@@ -15,12 +15,13 @@ print(CRITICAL_VALUE)   ## the critical value for later Chi2 merging
 
 class VarBinHelper:
     
-    ## has attributes : 
+    ## has attributes: 
         ## label, 
         ## bin_data, 
-        ## original_data
+        ## x_y_pair <<-- this is only 1 var and Y, 2 columns
         ## chi2records
         ## critical_value
+        ## original_DF <<-- entire DF of continuous variables and label column
     
     def __init__(self,label):
         self.label = label
@@ -46,8 +47,9 @@ class VarBinHelper:
         index=bin_size-1
 
         while index < len(sorted_x):         ##  Jump every <bin_size> in the sorted X array to record cut points
-            bin_up.append(sorted_x[index])   ##  every bin_low is exclusive, bin_up is inclusive, interval like (low,up]
-            bin_low.append(sorted_x[index])
+            if sorted_x[index] not in bin_up:
+                bin_up.append(sorted_x[index])   ##  every bin_low is exclusive, bin_up is inclusive, interval like (low,up]
+                bin_low.append(sorted_x[index])
             index+=bin_size
 
         bin_low = bin_low[:-1]
@@ -58,61 +60,67 @@ class VarBinHelper:
         self.bin_data = result
         return result
     
-    def mapping_bin(self, original_data, bin_data = None, label = None):
+    def mapping_bin(self, x_y_pair = None, bin_data = None, label = None):
     
         ## original data should be 2 columns, X and Y, column 0 is X
         
         if label is None:
-            label = self.label    
+            label = self.label  
+        if x_y_pair is None and self.x_y_pair is not None:
+            x_y_pair = self.x_y_pair
                 
-        var_name = original_data.columns[0]
+        var_name = x_y_pair.columns[0]
         if var_name == label:
-            var_name = original_data.columns[1]   ## find the X var name
+            var_name = x_y_pair.columns[1]   ## find the X var name
             
         if bin_data is None:                ## find own attribute, OR run initialise bin, if bin_data is not given
             try:
                 bin_data = self.bin_data
             except:
-                bin_data = self.init_equal_frequency(original_data[var_name])
+                bin_data = self.init_equal_frequency(x_y_pair[var_name])
                 
-        outputDF = original_data.copy()
+        outputDF = x_y_pair.copy()
         outputDF['bin'] = 0
         
         for index, row in bin_data.iterrows():  ## Actual mapping
             outputDF.loc[(outputDF[var_name]>row.bin_low) & (outputDF[var_name]<=row.bin_up),'bin'] = index
             
-        self.original_data = outputDF   ## update object attribute when finished
+        self.x_y_pair = outputDF   ## update object attribute when finished
         return outputDF
     
-    def calc_chi_2(self, bin_data = None, original_data_mapped = None, label = None): 
-    ## to generate the first table of chi2 and bad rates etc, for further merging
+    def calc_chi_2(self, bin_data = None, x_y_pair_mapped = None, label = None): 
+    ## to generate the first table of 
         if bin_data is None:
             bin_data = self.bin_data
-        if original_data_mapped is None:
-            original_data_mapped = self.original_data
+        if x_y_pair_mapped is None:
+            x_y_pair_mapped = self.x_y_pair
         if label is None:
             label = self.label    
             
         # bin_data is the output from initialisation (same frequency or same distance)
-        # original_data_mapped should have 3 columns, just the X var and Y label, + mapping output
+        # x_y_pair_mapped should have 3 columns, just the X var and Y label, + mapping output
 
-        total_bad = len(original_data_mapped.loc[original_data_mapped[label]==1])
-        total_good = len(original_data_mapped.loc[original_data_mapped[label]==0])
+    #     var_name = x_y_pair_mapped.columns[0]
+    #     if var_name == label:
+    #         var_name = x_y_pair_mapped.columns[1]   < ---- might not need
+        total_bad = len(x_y_pair_mapped.loc[x_y_pair_mapped[label]==1])
+        total_good = len(x_y_pair_mapped.loc[x_y_pair_mapped[label]==0])
 
         df = pd.DataFrame(columns = ["bin_low","bin_up","sample_count","bad_count","good_count","bad_rate","bad_count_exp","good_count_exp","Chi_2","Chi_2_if_merge"],index=bin_data.index)
         df.loc[:,['bin_low','bin_up']] = bin_data
         
         for index, row in df.iterrows():
-            row.sample_count = len(original_data_mapped.loc[(original_data_mapped.bin == index)])
-            row.bad_count = len(original_data_mapped.loc[(original_data_mapped.bin == index) & (original_data_mapped[label]==1)])
-            row.good_count = len(original_data_mapped.loc[(original_data_mapped.bin == index) & (original_data_mapped[label]==0)])
-            row.bad_count_exp = (row.sample_count)/len(original_data_mapped)*total_bad
-            row.good_count_exp = (row.sample_count)/len(original_data_mapped)*total_good
+            row.sample_count = len(x_y_pair_mapped.loc[(x_y_pair_mapped.bin == index)])
+            row.bad_count = len(x_y_pair_mapped.loc[(x_y_pair_mapped.bin == index) & (x_y_pair_mapped[label]==1)])
+            row.good_count = len(x_y_pair_mapped.loc[(x_y_pair_mapped.bin == index) & (x_y_pair_mapped[label]==0)])
+            row.bad_count_exp = (row.sample_count)/len(x_y_pair_mapped)*total_bad
+            row.good_count_exp = (row.sample_count)/len(x_y_pair_mapped)*total_good
             row.Chi_2 = chisquare([row.bad_count,row.good_count], f_exp=[row.bad_count_exp,row.good_count_exp])[0]
             if index>0:
                 row.Chi_2_if_merge = row.Chi_2 + df.Chi_2[index-1]
-                
-        df.bad_rate = df.bad_count / df.sample_count        
+            if row.sample_count !=0:
+                row.bad_rate = row.bad_count / row.sample_count     
+                   
         self.chi2records = df
         return df
     
@@ -155,21 +163,13 @@ class VarBinHelper:
         if critical_value is None:
             critical_value = self.critical_value
         
-        while len(copyDF) > min_bins:    ## merge all bins which if merge, will have Chi2 < critical value.
-            Chi2_as_num = pd.to_numeric(copyDF['Chi_2_if_merge'])
+        while len(copyDF) > min_bins:                              ## merge all bins pairs with Chi2 < critical value, starting with lowest Chi 2 value
+            Chi2_as_num = pd.to_numeric(copyDF['Chi_2_if_merge'])  ## stop when min_bin is reached, or when no more Chi 2 < critical value
             index = Chi2_as_num.idxmin()
             if copyDF.loc[index,'Chi_2_if_merge'] > critical_value:
                 break
             copyDF = self.merge_2_bins_in_df(index-1, copyDF)
 
-          ### -- below is to merge by first index with Chi2 < critical value  
-    #         chi2_if_merge_with_previous = copyDF.loc[row_index,'Chi_2_if_merge']
-
-    #         if (chi2_if_merge_with_previous < critical_value) and (chi2_if_merge_with_previous < copyDF.loc[row_index+1,'Chi_2_if_merge']):
-    #             copyDF = merge_2_bins_in_df(copyDF, row_index-1)
-    #             row_index = 1
-    #         else:
-    #             row_index+=1
 
         if max_bins is not None:    ## further merge bins if there is a required number of bins
             while max_bins<len(copyDF):  
@@ -177,5 +177,21 @@ class VarBinHelper:
                 index = Chi2_as_num.idxmin()
                 copyDF = self.merge_2_bins_in_df(index-1,copyDF)
         self.chi2records = copyDF
+        self.bin_data = copyDF.iloc[:,0:2].copy()
         return copyDF
+    
+    def fit_single_x(self, x_y_pair = None, bin_rate = 0.01, critical_value=None, min_bins = 2, max_bins = None):
+        if x_y_pair is None:
+            x_y_pair = self.x_y_pair
+        self.init_equal_frequency(x_y_pair.drop(columns = [self.label]).iloc[:,0], bin_rate)
+        self.mapping_bin(x_y_pair)
+        self.calc_chi_2()
+        self.chi2_merge_loop(critical_value=critical_value, min_bins = min_bins, max_bins = max_bins)
+
+    def transform_single_x(self, x_y_pair = None):
+        if x_y_pair is None:
+            x_y_pair = self.x_y_pair
+        return self.mapping_bin().bin
+    
+    
         

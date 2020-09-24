@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 from time import time as now
 from scipy.stats import chisquare
+import math
 
 # Chi-Squared Percent Point Function
 from scipy.stats import chi2
@@ -11,22 +12,22 @@ p = 0.95
 df = 1
 # retrieve value <= probability
 CRITICAL_VALUE = chi2.ppf(p, df)
-print(CRITICAL_VALUE)   ## the critical value for later Chi2 merging
+# print(CRITICAL_VALUE)   ## the critical value for later Chi2 merging
 
 class VarBinHelper:
     
     ## has attributes: 
-        ## label, 
-        ## bin_data, 
+        ## label, <<-- should be consistent throughout 1 dataset
+        ## bin_intervals, <<-- bin intervals for 1 var
         ## x_y_pair <<-- this is only 1 var and Y, 2 columns
-        ## chi2records
-        ## critical_value
-        ## original_DF <<-- entire DF of continuous variables and label column
+        ## chi2records  <<-- working dataframe for chi2 merge
+        ## critical_value <<-- chi2 merge critical value
+        ## original_df <<-- entire DF of continuous variables and label column
     
-    def __init__(self,label):
+    def __init__(self,label):    ## initialise the object with name of label column
         self.label = label
         self.set_critical_value(0.95,1)
-#         self.bin_data = 0   <-- see if need this
+#         self.bin_intervals = 0   <-- see if need this
 
     def set_critical_value(self,p=0.95,df=1):
         self.critical_value = chi2.ppf(p, df)
@@ -46,21 +47,22 @@ class VarBinHelper:
 
         index=bin_size-1
 
-        while index < len(sorted_x):         ##  Jump every <bin_size> in the sorted X array to record cut points
-            if sorted_x[index] not in bin_up:
-                bin_up.append(sorted_x[index])   ##  every bin_low is exclusive, bin_up is inclusive, interval like (low,up]
-                bin_low.append(sorted_x[index])
+        while index < len(sorted_x):
+            current_x = sorted_x[index]  ##  Jump every <bin_size> in the sorted X array to record cut points
+            if current_x not in bin_up and not math.isnan(current_x):   ## prevent having intervals like (x,x], empty bin
+                bin_up.append(current_x)   ##  every bin_low is exclusive, bin_up is inclusive, interval like (low,up]
+                bin_low.append(current_x)
             index+=bin_size
 
         bin_low = bin_low[:-1]
-        bin_up[-1]= np.inf
+        bin_up[-1] = np.inf
         result = pd.DataFrame({'bin_low':bin_low,'bin_up':bin_up})
         result.index.name = 'bin_num'
         
-        self.bin_data = result
+        self.bin_intervals = result
         return result
     
-    def mapping_bin(self, x_y_pair = None, bin_data = None, label = None):
+    def mapping_bin(self, x_y_pair = None, bin_intervals = None, label = None):
     
         ## original data should be 2 columns, X and Y, column 0 is X
         
@@ -73,31 +75,31 @@ class VarBinHelper:
         if var_name == label:
             var_name = x_y_pair.columns[1]   ## find the X var name
             
-        if bin_data is None:                ## find own attribute, OR run initialise bin, if bin_data is not given
+        if bin_intervals is None:                ## find own attribute, OR run initialise bin, if bin_intervals is not given
             try:
-                bin_data = self.bin_data
+                bin_intervals = self.bin_intervals
             except:
-                bin_data = self.init_equal_frequency(x_y_pair[var_name])
+                bin_intervals = self.init_equal_frequency(x_y_pair[var_name])
                 
         outputDF = x_y_pair.copy()
         outputDF['bin'] = 0
         
-        for index, row in bin_data.iterrows():  ## Actual mapping
+        for index, row in bin_intervals.iterrows():  ## Actual mapping
             outputDF.loc[(outputDF[var_name]>row.bin_low) & (outputDF[var_name]<=row.bin_up),'bin'] = index
             
-        self.x_y_pair = outputDF   ## update object attribute when finished
+        self.x_y_pair = outputDF   ## update object attribute when finished, with columns X, Y and 'bin'
         return outputDF
     
-    def calc_chi_2(self, bin_data = None, x_y_pair_mapped = None, label = None): 
+    def calc_chi_2(self, bin_intervals = None, x_y_pair_mapped = None, label = None): 
     ## to generate the first table of 
-        if bin_data is None:
-            bin_data = self.bin_data
+        if bin_intervals is None:
+            bin_intervals = self.bin_intervals
         if x_y_pair_mapped is None:
             x_y_pair_mapped = self.x_y_pair
         if label is None:
-            label = self.label    
+            label = self.label
             
-        # bin_data is the output from initialisation (same frequency or same distance)
+        # bin_intervals is the output from initialisation (same frequency or same distance)
         # x_y_pair_mapped should have 3 columns, just the X var and Y label, + mapping output
 
     #     var_name = x_y_pair_mapped.columns[0]
@@ -106,8 +108,8 @@ class VarBinHelper:
         total_bad = len(x_y_pair_mapped.loc[x_y_pair_mapped[label]==1])
         total_good = len(x_y_pair_mapped.loc[x_y_pair_mapped[label]==0])
 
-        df = pd.DataFrame(columns = ["bin_low","bin_up","sample_count","bad_count","good_count","bad_rate","bad_count_exp","good_count_exp","Chi_2","Chi_2_if_merge"],index=bin_data.index)
-        df.loc[:,['bin_low','bin_up']] = bin_data
+        df = pd.DataFrame(columns = ["bin_low","bin_up","sample_count","bad_count","good_count","bad_rate","bad_count_exp","good_count_exp","Chi_2","Chi_2_if_merge"],index=bin_intervals.index)
+        df.loc[:,['bin_low','bin_up']] = bin_intervals
         
         for index, row in df.iterrows():
             row.sample_count = len(x_y_pair_mapped.loc[(x_y_pair_mapped.bin == index)])
@@ -170,28 +172,84 @@ class VarBinHelper:
                 break
             copyDF = self.merge_2_bins_in_df(index-1, copyDF)
 
-
-        if max_bins is not None:    ## further merge bins if there is a required number of bins
+        if max_bins is not None:                         ## further merge bins if there is a max number of bins
             while max_bins<len(copyDF):  
                 Chi2_as_num = pd.to_numeric(copyDF['Chi_2_if_merge'])
                 index = Chi2_as_num.idxmin()
                 copyDF = self.merge_2_bins_in_df(index-1,copyDF)
         self.chi2records = copyDF
-        self.bin_data = copyDF.iloc[:,0:2].copy()
+        self.bin_intervals = copyDF.iloc[:,0:2].copy()
         return copyDF
     
-    def fit_single_x(self, x_y_pair = None, bin_rate = 0.01, critical_value=None, min_bins = 2, max_bins = None):
+    def fit_single_x(self, x_y_pair = None, method = 0, bin_rate = 0.01, critical_value=None, min_bins = 2, max_bins = None):
         if x_y_pair is None:
             x_y_pair = self.x_y_pair
-        self.init_equal_frequency(x_y_pair.drop(columns = [self.label]).iloc[:,0], bin_rate)
-        self.mapping_bin(x_y_pair)
-        self.calc_chi_2()
-        self.chi2_merge_loop(critical_value=critical_value, min_bins = min_bins, max_bins = max_bins)
+            
+        ## default method chi 2
+        if method == 0:     
+            self.init_equal_frequency(x_y_pair.drop(columns = [self.label]).iloc[:,0], bin_rate)
+            self.mapping_bin(x_y_pair)
+            self.calc_chi_2()
+            self.chi2_merge_loop(critical_value=critical_value, min_bins = min_bins, max_bins = max_bins)
+            
+        ## write more methods here ---------------------------
 
-    def transform_single_x(self, x_y_pair = None):
+    def transform_single_x(self, x_y_pair = None, bin_intervals = None):
         if x_y_pair is None:
             x_y_pair = self.x_y_pair
-        return self.mapping_bin().bin
+        return self.mapping_bin(x_y_pair, bin_intervals).bin
     
+    def fit(self, original_df, label=None, cont_var_list = [], excepted_var_list =[], method = 0, bin_rate = 0.01, critical_value=None, min_bins = 2, max_bins = None):
+        ## fitting entire given df, and store bin intervals in a df
+        
+        if label is None:
+            label = self.label
+        if len(cont_var_list) == 0:
+            cont_var_list = original_df.columns.tolist()
+            cont_var_list.remove(label)
+            
+        for col_name in excepted_var_list:
+            try: 
+                cont_var_list.remove(col_name)
+            except:
+                print(col_name," not in the cont_var_list")
+            
+        all_results = pd.DataFrame(columns = ["bin_intervals" , "fit_records"], index = cont_var_list)
+        bin_intervals = []
+        fit_records = []
+
+        ## start to iterate through every variable
+        for var in cont_var_list:                       
+            xy_pair = original_df.loc[:,[var,label]]
+            self.fit_single_x(xy_pair, method, bin_rate, critical_value, min_bins, max_bins)
+            bin_intervals.append(self.bin_intervals)
+            if method == 0:
+                fit_records.append(self.chi2records)
+        
+        all_results.bin_intervals = bin_intervals
+        all_results.fit_records = fit_records
+        
+        self.fit_results = all_results
+        return all_results
+    
+    def transform(self, original_df, cont_var_list = [], excepted_var_list =[]):
+        if len(cont_var_list) == 0:
+            cont_var_list = self.fit_results.index.tolist()
+            
+        for col_name in excepted_var_list:
+            try: 
+                cont_var_list.remove(col_name)
+            except:
+                print(col_name," not in the cont_var_list")
+                
+        df = original_df.copy()
+        
+        for var in cont_var_list:
+            df.loc[:,var] = self.transform_single_x(x_y_pair = original_df.loc[:,[var,self.label]], bin_intervals = self.fit_results.loc[var,'bin_intervals'])
+        
+        
+        return df
+            
+        
     
         
